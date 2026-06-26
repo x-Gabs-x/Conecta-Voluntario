@@ -68,6 +68,16 @@ CREATE TABLE Usuarios (
     SenhaHash VARCHAR(255)
 );
 
+CREATE TABLE Enderecos (
+    id_endereco INT PRIMARY KEY AUTO_INCREMENT,
+    logradouro VARCHAR(150),
+    bairro VARCHAR(100),
+    cidade VARCHAR(100),
+    uf CHAR(2),
+    id_usuario_fk INT,
+    FOREIGN KEY (id_usuario_fk) REFERENCES Usuarios(ID_Usuario)
+);
+
 CREATE TABLE LogsSistema (
     ID_Log INT PRIMARY KEY AUTO_INCREMENT,
     Usuario VARCHAR(100) DEFAULT 'Sistema', 
@@ -292,6 +302,18 @@ END$$
 
 DELIMITER ;
 
+DELIMITER $$
+CREATE TRIGGER trg_trava_horario_comercial
+BEFORE INSERT ON Oportunidades
+FOR EACH ROW
+BEGIN
+    IF CURTIME() < '08:00:00' OR CURTIME() > '18:00:00' THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'ERRO: Operações na tabela Oportunidades permitidas apenas em horário comercial (08h às 18h).';
+    END IF;
+END$$
+DELIMITER ;
+
 INSERT INTO Areas_Atuacao (NomeArea, Descricao) VALUES 
 ('Educação', 'Aulas de reforço escolar e alfabetização.'),
 ('Meio Ambiente', 'Ações de reflorestamento e reciclagem.');
@@ -328,7 +350,7 @@ SELECT * FROM vw_RankingVoluntarios;
 SELECT * FROM vw_LogAuditoria;
 
 
--- Testes do banco
+
 CALL sp_RegistrarInscricao(2, 2);
 
 SELECT ID_Inscricao, ID_Voluntario, Status FROM Inscricoes;
@@ -340,3 +362,20 @@ CALL sp_FinalizarParticipacao(2, 12);
 SELECT Titulo, Vagas_Ocupadas FROM Oportunidades WHERE ID_Oportunidade = 2;
 
 SELECT * FROM HistoricoImpacto WHERE ID_Voluntario = 2;
+
+CREATE USER IF NOT EXISTS 'usr_admin'@'localhost' IDENTIFIED BY 'admin123';
+GRANT ALL PRIVILEGES ON ConectaVoluntario.* TO 'usr_admin'@'localhost';
+
+CREATE USER IF NOT EXISTS 'usr_gestor_ong'@'localhost' IDENTIFIED BY 'gestor123';
+GRANT SELECT, INSERT, UPDATE, DELETE ON ConectaVoluntario.* TO 'usr_gestor_ong'@'localhost';
+REVOKE DELETE ON ConectaVoluntario.LogsSistema FROM 'usr_gestor_ong'@'localhost';
+
+
+CREATE USER IF NOT EXISTS 'usr_iniciante'@'localhost' IDENTIFIED BY 'iniciante123';
+GRANT SELECT, INSERT ON ConectaVoluntario.* TO 'usr_iniciante'@'localhost';
+REVOKE DELETE ON ConectaVoluntario.Oportunidades FROM 'usr_iniciante'@'localhost';
+
+CREATE USER IF NOT EXISTS 'usr_visitante'@'localhost' IDENTIFIED BY 'visitante123';
+GRANT SELECT ON ConectaVoluntario.vw_FeedOportunidades TO 'usr_visitante'@'localhost';
+
+FLUSH PRIVILEGES;
