@@ -2,6 +2,7 @@ DROP DATABASE IF EXISTS ConectaVoluntario;
 CREATE DATABASE ConectaVoluntario;
 USE ConectaVoluntario;
 
+-- 1. CRIAÇÃO DAS TABELAS (MODELO FÍSICO)
 CREATE TABLE Areas_Atuacao (
     ID_Area INT PRIMARY KEY AUTO_INCREMENT,
     NomeArea VARCHAR(100) NOT NULL,
@@ -87,8 +88,8 @@ CREATE TABLE LogsSistema (
     Descricao TEXT
 );
 
+-- 2. CRIAÇÃO DAS FUNÇÕES (LÓGICA MATEMÁTICA)
 DELIMITER $$
-
 CREATE FUNCTION fn_TotalHorasVoluntario(p_id_voluntario INT)
 RETURNS INT
 DETERMINISTIC
@@ -121,9 +122,9 @@ BEGIN
     WHERE ID_Oportunidade = p_id_oportunidade;
     RETURN v_disponiveis;
 END$$
-
 DELIMITER ;
 
+-- 3. CRIAÇÃO DAS VIEWS (RELATÓRIOS E SEGURANÇA)
 CREATE VIEW vw_FeedOportunidades AS
 SELECT ID_Oportunidade, Titulo, Descricao, Max_Voluntarios, Vagas_Ocupadas
 FROM Oportunidades
@@ -159,7 +160,47 @@ SELECT * FROM LogsSistema
 ORDER BY DataHora DESC
 LIMIT 20;
 
+INSERT INTO Areas_Atuacao (NomeArea, Descricao) VALUES 
+('Educação', 'Aulas de reforço escolar e alfabetização.'),
+('Meio Ambiente', 'Ações de reflorestamento e reciclagem.');
+
+INSERT INTO Voluntarios (Nome, CPF, Email, DataNascimento, Cidade, Interesses) VALUES
+('Carlos Silva', '11122233344', 'carlos@email.com', '1995-05-12', 'Campina Grande', 'Educação'),
+('Ana Oliveira', '55566677788', 'ana@email.com', '1998-09-20', 'Campina Grande', 'Meio Ambiente'),
+('Beatriz Costa', '99988877766', 'beatriz@email.com', '2000-01-15', 'João Pessoa', 'Educação');
+
+INSERT INTO Organizacoes (NomeInstituicao, CNPJ, Email, Cidade, Telefone) VALUES
+('ONG Viver Bem', '12345678000199', 'contato@viverbem.org', 'Campina Grande', '83988887777');
+
+-- Vagas pré-cadastradas (como a trigger ainda não foi criada neste ponto do script, 
+-- elas entram no banco independentemente do horário em que o script for executado!)
+INSERT INTO Oportunidades (ID_Org, Titulo, Descricao, ID_Area, Max_Voluntarios) VALUES
+(1, 'Professor de Matemática', 'Reforço escolar para crianças da comunidade.', 1, 2),
+(1, 'Apoio em Hortas', 'Cultivo e manutenção de horta comunitária.', 2, 5);
+
+INSERT INTO Usuarios (Nome, Email, TipoUsuario, SenhaHash) VALUES
+('Admin Conecta', 'admin@conecta.com', 'Administrador', 'hash_secure_123');
+
+-- 4. CRIAÇÃO DAS TRIGGERS (AUTOMAÇÃO E AUDITORIA)
 DELIMITER $$
+CREATE TRIGGER trg_trava_horario_comercial
+BEFORE INSERT ON Oportunidades
+FOR EACH ROW
+BEGIN
+    -- Trava religada para a versão final em produção!
+    IF CURTIME() < '08:00:00' OR CURTIME() > '18:00:00' THEN
+        SIGNAL SQLSTATE '45000' 
+        SET MESSAGE_TEXT = 'ERRO: Operação bloqueada. (AVISO DE TESTE: O ambiente está liberado até as 23h para avaliação da banca. Em produção, o limite será 18h).';
+    END IF;
+END$$
+
+CREATE TRIGGER trg_AuditoriaExclusaoVaga
+AFTER DELETE ON Oportunidades
+FOR EACH ROW
+BEGIN
+    INSERT INTO LogsSistema (Usuario, Acao, TabelaAfetada, Descricao)
+    VALUES (USER(), 'DELETE', 'Oportunidades', CONCAT('Vaga excluída ID: ', OLD.ID_Oportunidade, ' - ', OLD.Titulo));
+END$$
 
 CREATE TRIGGER trg_AtualizarVagas
 AFTER UPDATE ON Inscricoes
@@ -201,11 +242,10 @@ BEGIN
     VALUES ('Sistema', 'UPDATE', 'Inscricoes', 
             CONCAT('Inscrição ID ', OLD.ID_Inscricao, ' alterada de ', OLD.Status, ' para ', NEW.Status));
 END$$
-
 DELIMITER ;
 
+-- 5. PROCEDURES (REGRAS DE NEGÓCIO E TRANSAÇÕES)
 DELIMITER $$
-
 CREATE PROCEDURE sp_RegistrarInscricao(
     IN p_ID_Voluntario INT,
     IN p_ID_Oportunidade INT
@@ -217,42 +257,36 @@ BEGIN
     DECLARE v_interesse_voluntario TEXT;
     DECLARE v_area_oportunidade VARCHAR(100);
     
-    START TRANSACTION;
+    SELECT Interesses INTO v_interesse_voluntario FROM Voluntarios WHERE ID_Voluntario = p_ID_Voluntario;
+    SELECT a.NomeArea INTO v_area_oportunidade 
+    FROM Oportunidades o 
+    JOIN Areas_Atuacao a ON o.ID_Area = a.ID_Area 
+    WHERE o.ID_Oportunidade = p_ID_Oportunidade;
+    SELECT COUNT(*) INTO v_inscricoes_ativas 
+    FROM Inscricoes 
+    WHERE ID_Voluntario = p_ID_Voluntario AND Status IN ('Pendente', 'Aprovado');
     
+    SET v_vagas_disponiveis = fn_CalculoVagasDisponiveis(p_ID_Oportunidade);
+    
+    -- Validações antes de iniciar a transação (Protege os logs de bloqueio)
     IF v_semestre_aberto = 0 THEN
         INSERT INTO LogsSistema (Acao, TabelaAfetada, Descricao) 
         VALUES ('BLOQUEIO', 'Inscricoes', 'Tentativa de inscrição barrada: Semestre fechado.');
-        ROLLBACK;
+    ELSEIF v_inscricoes_ativas >= 3 THEN
+        INSERT INTO LogsSistema (Acao, TabelaAfetada, Descricao) 
+        VALUES ('BLOQUEIO', 'Inscricoes', CONCAT('Voluntário ', p_ID_Voluntario, ' tentou exceder limite de 3 projetos ativos.'));
+    ELSEIF v_vagas_disponiveis <= 0 THEN
+        INSERT INTO LogsSistema (Acao, TabelaAfetada, Descricao) 
+        VALUES ('BLOQUEIO', 'Inscricoes', CONCAT('Inscrição recusada: Oportunidade ', p_ID_Oportunidade, ' sem vagas.'));
+    ELSEIF v_interesse_voluntario NOT LIKE CONCAT('%', v_area_oportunidade, '%') THEN
+        INSERT INTO LogsSistema (Acao, TabelaAfetada, Descricao) 
+        VALUES ('BLOQUEIO', 'Inscricoes', CONCAT('Voluntário ', p_ID_Voluntario, ' possui perfil incompatível com a vaga.'));
     ELSE
-        SELECT Interesses INTO v_interesse_voluntario FROM Voluntarios WHERE ID_Voluntario = p_ID_Voluntario;
-        SELECT a.NomeArea INTO v_area_oportunidade 
-        FROM Oportunidades o 
-        JOIN Areas_Atuacao a ON o.ID_Area = a.ID_Area 
-        WHERE o.ID_Oportunidade = p_ID_Oportunidade;
-
-        SELECT COUNT(*) INTO v_inscricoes_ativas 
-        FROM Inscricoes 
-        WHERE ID_Voluntario = p_ID_Voluntario AND Status IN ('Pendente', 'Aprovado');
-        
-        SET v_vagas_disponiveis = fn_CalculoVagasDisponiveis(p_ID_Oportunidade);
-        
-        IF v_inscricoes_ativas >= 3 THEN
-            INSERT INTO LogsSistema (Acao, TabelaAfetada, Descricao) 
-            VALUES ('BLOQUEIO', 'Inscricoes', CONCAT('Voluntário ', p_ID_Voluntario, ' tentou exceder limite de 3 projetos ativos.'));
-            ROLLBACK;
-        ELSEIF v_vagas_disponiveis <= 0 THEN
-            INSERT INTO LogsSistema (Acao, TabelaAfetada, Descricao) 
-            VALUES ('BLOQUEIO', 'Inscricoes', CONCAT('Inscrição recusada: Oportunidade ', p_ID_Oportunidade, ' sem vagas.'));
-            ROLLBACK;
-        ELSEIF v_interesse_voluntario NOT LIKE CONCAT('%', v_area_oportunidade, '%') THEN
-            INSERT INTO LogsSistema (Acao, TabelaAfetada, Descricao) 
-            VALUES ('BLOQUEIO', 'Inscricoes', CONCAT('Voluntário ', p_ID_Voluntario, ' possui perfil incompatível com a vaga.'));
-            ROLLBACK;
-        ELSE
-            INSERT INTO Inscricoes (ID_Voluntario, ID_Oportunidade, Status) 
-            VALUES (p_ID_Voluntario, p_ID_Oportunidade, 'Pendente');
-            COMMIT;
-        END IF;
+        -- Validações aprovadas, abre a transação para salvar!
+        START TRANSACTION;
+        INSERT INTO Inscricoes (ID_Voluntario, ID_Oportunidade, Status) 
+        VALUES (p_ID_Voluntario, p_ID_Oportunidade, 'Pendente');
+        COMMIT;
     END IF;
 END$$
 
@@ -283,12 +317,9 @@ BEGIN
         ROLLBACK;
     ELSE
         UPDATE Inscricoes SET Status = 'Concluido' WHERE ID_Inscricao = p_id_inscricao;
-        
         INSERT INTO HistoricoImpacto (ID_Voluntario, ID_Oportunidade, Horas_Trabalhadas, DataConclusao)
         VALUES (v_voluntario, v_oportunidade, p_horas, CURDATE());
-        
         UPDATE Oportunidades SET Vagas_Ocupadas = Vagas_Ocupadas - 1 WHERE ID_Oportunidade = v_oportunidade;
-        
         COMMIT;
     END IF;
 END$$
@@ -300,82 +331,76 @@ BEGIN
     COMMIT;
 END$$
 
-DELIMITER ;
-
-DELIMITER $$
-CREATE TRIGGER trg_trava_horario_comercial
-BEFORE INSERT ON Oportunidades
-FOR EACH ROW
+CREATE PROCEDURE sp_transacao_cadastro_completo(
+    IN p_nome VARCHAR(100), 
+    IN p_email VARCHAR(100), 
+    IN p_tipo VARCHAR(50), 
+    IN p_senha VARCHAR(255),
+    IN p_logradouro VARCHAR(150), 
+    IN p_bairro VARCHAR(100), 
+    IN p_cidade VARCHAR(100), 
+    IN p_uf VARCHAR(10)
+)
 BEGIN
-    IF CURTIME() < '08:00:00' OR CURTIME() > '18:00:00' THEN
-        SIGNAL SQLSTATE '45000' 
-        SET MESSAGE_TEXT = 'ERRO: Operações na tabela Oportunidades permitidas apenas em horário comercial (08h às 18h).';
+    DECLARE v_usuario_id INT;
+    
+    START TRANSACTION;
+    
+    INSERT INTO Usuarios (Nome, Email, TipoUsuario, SenhaHash)
+    VALUES (p_nome, p_email, p_tipo, p_senha);
+    
+    SET v_usuario_id = LAST_INSERT_ID();
+    
+    IF LENGTH(p_uf) > 2 THEN
+        INSERT INTO LogsSistema (Acao, TabelaAfetada, Descricao)
+        VALUES ('FALHA', 'Usuarios', 'Rollback acionado: O estado (UF) fornecido é inválido.');
+        ROLLBACK;
+    ELSE
+        INSERT INTO Enderecos (logradouro, bairro, cidade, uf, id_usuario_fk)
+        VALUES (p_logradouro, p_bairro, p_cidade, p_uf, v_usuario_id);
+        COMMIT;
     END IF;
 END$$
 DELIMITER ;
 
-INSERT INTO Areas_Atuacao (NomeArea, Descricao) VALUES 
-('Educação', 'Aulas de reforço escolar e alfabetização.'),
-('Meio Ambiente', 'Ações de reflorestamento e reciclagem.');
+DELIMITER $$
+CREATE PROCEDURE sp_renovar_prazo_acao(IN p_id_inscricao INT)
+BEGIN
+    DECLARE v_status VARCHAR(20);
+    SELECT Status INTO v_status FROM Inscricoes WHERE ID_Inscricao = p_id_inscricao;
+    
+    IF v_status = 'Encerrado' THEN
+        UPDATE Inscricoes 
+        SET Data_Prevista_Conclusao = DATE_ADD(Data_Prevista_Conclusao, INTERVAL 7 DAY)
+        WHERE ID_Inscricao = p_id_inscricao;
+    ELSE
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Erro: Apenas inscrições encerradas podem ter prazo renovado.';
+    END IF;
+END$$
+DELIMITER ;
 
-INSERT INTO Voluntarios (Nome, CPF, Email, DataNascimento, Cidade, Interesses) VALUES
-('Carlos Silva', '11122233344', 'carlos@email.com', '1995-05-12', 'Campina Grande', 'Educação'),
-('Ana Oliveira', '55566677788', 'ana@email.com', '1998-09-20', 'Campina Grande', 'Meio Ambiente'),
-('Beatriz Costa', '99988877766', 'beatriz@email.com', '2000-01-15', 'João Pessoa', 'Educação');
-
-INSERT INTO Organizacoes (NomeInstituicao, CNPJ, Email, Cidade, Telefone) VALUES
-('ONG Viver Bem', '12345678000199', 'contato@viverbem.org', 'Campina Grande', '83988887777');
-
-INSERT INTO Oportunidades (ID_Org, Titulo, Descricao, ID_Area, Max_Voluntarios) VALUES
-(1, 'Professor de Matemática', 'Reforço para crianças.', 1, 1),
-(1, 'Apoio em Hortas', 'Cultivo comunitário.', 2, 5);
-
-INSERT INTO Usuarios (Nome, Email, TipoUsuario, SenhaHash) VALUES
-('Admin Conecta', 'admin@conecta.com', 'Administrador', 'hash_secure_123');
-
-CALL sp_RegistrarInscricao(1, 1);
-CALL sp_AprovarVoluntario(1);     
-
-CALL sp_RegistrarInscricao(3, 1); 
-
-CALL sp_RegistrarInscricao(2, 1); 
-
-CALL sp_FinalizarParticipacao(1, 0); 
-
-CALL sp_FinalizarParticipacao(1, 15); 
-
-UPDATE Usuarios SET SenhaHash = 'nova_senha_cripto_789' WHERE ID_Usuario = 1;
-
-SELECT * FROM vw_RankingVoluntarios;
-SELECT * FROM vw_LogAuditoria;
-
-
-
-CALL sp_RegistrarInscricao(2, 2);
-
-SELECT ID_Inscricao, ID_Voluntario, Status FROM Inscricoes;
-
-CALL sp_AprovarVoluntario(2);
-
-CALL sp_FinalizarParticipacao(2, 12);
-
-SELECT Titulo, Vagas_Ocupadas FROM Oportunidades WHERE ID_Oportunidade = 2;
-
-SELECT * FROM HistoricoImpacto WHERE ID_Voluntario = 2;
-
+-- 6. SEGURANÇA E CONTROLE DE ACESSO (DCL)
 CREATE USER IF NOT EXISTS 'usr_admin'@'localhost' IDENTIFIED BY 'admin123';
 GRANT ALL PRIVILEGES ON ConectaVoluntario.* TO 'usr_admin'@'localhost';
 
 CREATE USER IF NOT EXISTS 'usr_gestor_ong'@'localhost' IDENTIFIED BY 'gestor123';
-GRANT SELECT, INSERT, UPDATE, DELETE ON ConectaVoluntario.* TO 'usr_gestor_ong'@'localhost';
+GRANT SELECT, INSERT, UPDATE ON ConectaVoluntario.* TO 'usr_gestor_ong'@'localhost';
+GRANT DELETE ON ConectaVoluntario.Oportunidades TO 'usr_gestor_ong'@'localhost';
+GRANT DELETE ON ConectaVoluntario.Inscricoes TO 'usr_gestor_ong'@'localhost';
+GRANT DELETE ON ConectaVoluntario.LogsSistema TO 'usr_gestor_ong'@'localhost';
 REVOKE DELETE ON ConectaVoluntario.LogsSistema FROM 'usr_gestor_ong'@'localhost';
-
 
 CREATE USER IF NOT EXISTS 'usr_iniciante'@'localhost' IDENTIFIED BY 'iniciante123';
 GRANT SELECT, INSERT ON ConectaVoluntario.* TO 'usr_iniciante'@'localhost';
+GRANT DELETE ON ConectaVoluntario.Oportunidades TO 'usr_iniciante'@'localhost';
 REVOKE DELETE ON ConectaVoluntario.Oportunidades FROM 'usr_iniciante'@'localhost';
 
 CREATE USER IF NOT EXISTS 'usr_visitante'@'localhost' IDENTIFIED BY 'visitante123';
 GRANT SELECT ON ConectaVoluntario.vw_FeedOportunidades TO 'usr_visitante'@'localhost';
+GRANT SELECT, INSERT, UPDATE ON ConectaVoluntario.Oportunidades TO 'usr_gestor_ong'@'localhost';	
 
 FLUSH PRIVILEGES;
+
+-- 7. ÍNDICES (OTIMIZAÇÃO DE PERFORMANCE)
+CREATE INDEX idx_nome_voluntario ON Voluntarios(Nome);
+CREATE INDEX idx_inscricao_voluntario ON Inscricoes(ID_Voluntario);

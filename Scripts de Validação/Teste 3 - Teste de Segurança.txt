@@ -1,0 +1,1 @@
+Teste 03 (Segurança): Print com o Error Code 1142 (Delete Denied).
